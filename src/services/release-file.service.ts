@@ -3,47 +3,48 @@ import { Response } from 'express';
 import { ColInfo, utils, WorkSheet, write } from 'xlsx';
 import xml2js from 'xml2js';
 
-function parseProcesses(processes: any[]): Reference[] {
+function parseProcesses(releaseName: string, processes: any[]): Reference[] {
     const references: Reference[] = [];
     console.log(`Processes length: ${processes.length}`);
     for (const process of processes) {
         //console.log(process);
 
         if (process.process?.length > 0) {
-            references.push(...parseProcesses(process.process));
+            references.push(...parseProcesses(releaseName, process.process));
         }
 
         const stage = process.stage;
         if (stage) {
-            references.push(...parseStages(stage));
+            references.push(...parseStages(releaseName, stage));
         }
     }
 
     return references;
 }
 
-function parseStages(stages: any[]): Reference[] {
+function parseStages(releaseName: string, stages: any[]): Reference[] {
     const references: Reference[] = [];
     console.log(`Process stage length: ${stages.length}`);
     for (const stage of stages) {
         if (stage.resource) {
-            console.log(stage);
-            console.log(stage.resource);
+            //console.log(stage);
+            //console.log(stage.resource);
 
             const reference = new Reference();
+            reference.releaseName = releaseName;
             reference.object = stage.resource[0].$.object;
             reference.action = stage.resource[0].$.action;
 
             if (stage.inputs) {
                 reference.inputs = [];
-                console.log(JSON.stringify(stage.inputs, undefined, 4));
+                //console.log(JSON.stringify(stage.inputs, undefined, 4));
                 for (const input of stage.inputs) {
                     reference.inputs.push(input.input[0].$.name);
                 }
             }
             if (stage.outputs) {
                 reference.outputs = [];
-                console.log(JSON.stringify(stage.outputs, undefined, 4));
+                //console.log(JSON.stringify(stage.outputs, undefined, 4));
                 for (const output of stage.outputs) {
                     reference.outputs.push(output.output[0].$.name);
                 }
@@ -56,12 +57,12 @@ function parseStages(stages: any[]): Reference[] {
     return references;
 }
 
-function parseObjects(objects: any[]) {
+function parseObjects(releaseName: string, objects: any[]) {
     console.log(`Objects length: ${objects.length}`);
     for (const object of objects) {
-        console.log(object);
+        //console.log(object);
 
-        parseProcesses(object.process.process);
+        parseProcesses(releaseName, object.process.process);
     }
 }
 
@@ -76,13 +77,18 @@ export const releaseFileService = {
         if (xml) {
             console.log(xml);
 
+            let releaseName: string = 'Undefined';
+            if (xml.hasOwnProperty('bpr:release') && xml['bpr:release'].hasOwnProperty('bpr:name')) {
+                releaseName = xml['bpr:release']['bpr:name'].toString().replace('.bprelease', '');
+            }
+
             if (xml.hasOwnProperty('bpr:release') && xml['bpr:release'].hasOwnProperty('bpr:contents')) {
                 const content = xml['bpr:release']['bpr:contents'];
                 console.log(`Contents length: ${content.length}`);
                 for (const item of content) {
                     console.log(item);
 
-                    response.push(...parseProcesses(item.process));
+                    response.push(...parseProcesses(releaseName, item.process));
                     //parseObjects(item.object);
                 }
             }
@@ -124,32 +130,49 @@ export const releaseFileService = {
     getSpreadSheet(res: Response, references: Reference[]) {
         const wb = utils.book_new();
 
-        const values: string[][] = [];
+        let filename: string = 'odi-generator';
+        const sheets: { [key: string]: string[][] } = {};
         for (const reference of references) {
-            values.push([reference.object, reference.action, reference.inputs?.join(', '), reference.outputs?.join(', ')]);
-        }
-        const ws: WorkSheet = utils.aoa_to_sheet([['Objeto', 'Ação', 'Inputs', 'Outputs']]);
-        utils.sheet_add_aoa(ws, values, { origin: 'A2' });
+            filename = `${reference.releaseName}-odi`;
 
-        const wscols: ColInfo[] = [];
-        for (const row of values) {
-            for (let i = 0; i < row.length; i++) {
-                if (row[i]) {
-                    const cellLength: number = row[i].toString().length + 2;
-                    if (wscols[i]) {
-                        wscols[i] = { wch: Math.max(cellLength, wscols[i].wch || 0) };
-                    } else {
-                        wscols[i] = { wch: cellLength };
+            let sheetName: string = 'Geral';
+            if (reference.object.toLowerCase().indexOf('utility') === 0) {
+                sheetName = 'Utilities';
+            } else if (reference.object.toLowerCase().indexOf('ie_internetexplorer') === 0) {
+                sheetName = 'InternetExplorer';
+            } else if (reference.object.indexOf('_') > -1) {
+                sheetName = reference.object.substr(0, reference.object.indexOf('_'));
+            }
+
+            if (!sheets[sheetName]) {
+                sheets[sheetName] = [];
+            }
+            sheets[sheetName].push([reference.object, reference.action, reference.inputs?.join(', '), reference.outputs?.join(', ')]);
+        }
+
+        for (const sheetName in sheets) {
+            const values = sheets[sheetName];
+
+            const ws: WorkSheet = utils.aoa_to_sheet([['Objeto', 'Ação', 'Inputs', 'Outputs']]);
+            utils.sheet_add_aoa(ws, values, { origin: 'A2' });
+
+            const wscols: ColInfo[] = [];
+            for (const row of values) {
+                for (let i = 0; i < row.length; i++) {
+                    if (row[i]) {
+                        const cellLength: number = row[i].toString().length + 2;
+                        if (wscols[i]) {
+                            wscols[i] = { wch: Math.max(cellLength, wscols[i].wch || 0) };
+                        } else {
+                            wscols[i] = { wch: cellLength };
+                        }
                     }
                 }
             }
+            ws['!cols'] = wscols;
+
+            utils.book_append_sheet(wb, ws, sheetName);
         }
-        ws['!cols'] = wscols;
-
-        utils.book_append_sheet(wb, ws, 'ODI');
-
-        let filename = 'ODI';
-        filename = filename.replace(/ /g, '_');
 
         res.writeHead(200, {
             'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
